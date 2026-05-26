@@ -27,10 +27,7 @@ extension NSColor {
     }
 }
 
-// Initialize AppKit (keep CLI tool characteristics)
-NSApplication.shared.setActivationPolicy(.accessory)
-
-// ================= 🎨 Standalone Visual Settings Center =================
+// ================= Visual Settings Center =================
 struct WatermarkStyleSettings {
     
     // MARK: - 1. User Color Pool (UI Layer)
@@ -84,11 +81,13 @@ struct WatermarkStyleSettings {
 
 // ================= Global Constants & Temp Management =================
 private let supportedFileExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "pdf"]
+// Shared temp directory for PDF intermediate files. Only safe for single-run CLI use —
+// if run() is ever called more than once per process, each invocation should use its own subdirectory.
 let pdfTempBaseDir = FileManager.default.temporaryDirectory.appendingPathComponent("SwiftWatermark_\(getpid())")
 
 private let fontMapping: [String: String] = [
     "PingFangSC-Regular": "PingFangSC-Regular",
-    "STHeiti": "PingFangSC-Semibold",
+    "PingFangSC-Semibold": "PingFangSC-Semibold",
     "STKaiti": "STKaiti",
     "STSong": "STSong",
     "STFangsong": "STFangsong",
@@ -142,7 +141,7 @@ enum TerminalUI {
             
             if process.terminationStatus == 0 {
                 let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let result = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "\n")) ?? ""
+                let result = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .newlines) ?? ""
                 return result.isEmpty ? nil : result
             } else {
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
@@ -177,7 +176,7 @@ enum TerminalUI {
     /// Prompts the user in the terminal to select a font.
     static func selectFontInTerminal() -> (name: String, font: NSFont)? {
         let allFonts = ["System Default (PingFangSC-Bold)"] + fontMapping.keys.sorted()
-        print("🔤 Please select watermark font (Press Enter for default):")
+        print("🔔 Please select watermark font (Press Enter for default):")
         for (index, fontName) in allFonts.enumerated() {
             print(" \(index + 1). \(fontName)\(index == 0 ? " (Default)" : "")")
         }
@@ -191,8 +190,8 @@ enum TerminalUI {
             return (defaultName, defaultFont)
         }
         
-        guard let choice = Int(input!), (1...allFonts.count).contains(choice) else {
-            print("❌ Invalid font choice.")
+        guard let input = input, let choice = Int(input), (1...allFonts.count).contains(choice) else {
+            print("✘ Invalid font choice.")
             return nil
         }
         
@@ -208,8 +207,7 @@ enum TerminalUI {
             return ("System Default (Fallback)", NSFont.systemFont(ofSize: 100.0, weight: .bold))
         }
         
-        let finalName = (selectedName == "STHeiti") ? "PingFangSC-Semibold" : selectedName
-        return (finalName, nsFont)
+        return (selectedName, nsFont)
     }
     
     /// Prompts the user in the terminal to select a color. Accepts external settings.
@@ -229,12 +227,18 @@ enum TerminalUI {
         }
         
         guard let choice = Int(input!), (1...settings.availableColors.count).contains(choice) else {
-            print("❌ Invalid color choice.")
+            print("✘ Invalid color choice.")
             return nil
         }
         
         let selected = settings.availableColors[choice - 1]
         return (selected.name, selected.color)
+    }
+}
+
+extension CGImageAlphaInfo {
+    var hasAlpha: Bool {
+        self != .none && self != .noneSkipFirst && self != .noneSkipLast
     }
 }
 
@@ -269,7 +273,7 @@ enum WatermarkEngine {
         do {
             try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
         } catch {
-            print("❌ Failed to create output directory: \(error)")
+            print("✘ Failed to create output directory: \(error)")
             return nil
         }
         
@@ -290,34 +294,18 @@ enum WatermarkEngine {
         guard baseWidth > 0 else { return baseSize }
         return baseSize * (targetLength / baseWidth)
     }
-    
-    /// Processes a single image file (PNG, JPG, HEIC).
-    static func processImage(url: URL, config: WatermarkConfig, settings: WatermarkStyleSettings) {
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
-            print("⚠️ Skipped (invalid, corrupted, or unsupported image format): \(url.lastPathComponent)")
-            return
-        }
-        
-        let size = NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
-        guard size.width > 0, size.height > 0 else {
-            print("⚠️ Skipped (image size is zero): \(url.lastPathComponent)")
-            return
-        }
-        
-        // Determine if the image has an alpha channel to decide the rendering strategy
-        let alphaInfo = cgImage.alphaInfo
-        let hasAlpha = (alphaInfo != .none && alphaInfo != .noneSkipFirst && alphaInfo != .noneSkipLast)
-        
+
+    /// Draws watermark text onto an image and returns the resulting bitmap.
+    private static func drawWatermark(on cgImage: CGImage, size: NSSize, hasAlpha: Bool,
+                                       config: WatermarkConfig, settings: WatermarkStyleSettings) -> NSBitmapImageRep? {
         let minDimension = min(size.width, size.height)
         let targetLen = minDimension * sqrt(2) * settings.diagonalRatio
         let fontSize = calculateFontSize(text: config.maxLineText, targetLength: targetLen, font: config.font)
         let drawFont = NSFont(descriptor: config.font.fontDescriptor, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize, weight: .bold)
-        
+
         let lineHeight = fontSize * settings.lineHeightMultiplier
         let totalHeight = CGFloat(config.lines.count) * lineHeight
-        
-        // Create an 8-bit RGBA bitmap context
+
         guard let bitmapRep = NSBitmapImageRep(bitmapDataPlanes: nil,
                                                pixelsWide: Int(size.width),
                                                pixelsHigh: Int(size.height),
@@ -328,46 +316,40 @@ enum WatermarkEngine {
                                                colorSpaceName: .deviceRGB,
                                                bytesPerRow: 0,
                                                bitsPerPixel: 0) else {
-            print("⚠️ Skipped (failed to create bitmap context): \(url.lastPathComponent)")
-            return
+            print("⚠️ Skipped (failed to create bitmap context)")
+            return nil
         }
-        
+
         guard let nsContext = NSGraphicsContext(bitmapImageRep: bitmapRep) else {
-            print("⚠️ Skipped (failed to create graphics context): \(url.lastPathComponent)")
-            return
+            print("⚠️ Skipped (failed to create graphics context)")
+            return nil
         }
-        
+
         let ctx = nsContext.cgContext
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = nsContext
-        
-        // Draw the original image as the base layer
+
         let tempNSImage = NSImage(cgImage: cgImage, size: size)
         tempNSImage.draw(in: NSRect(origin: .zero, size: size),
                          from: NSRect(origin: .zero, size: size),
                          operation: .sourceOver,
                          fraction: 1.0)
-        
+
         ctx.saveGState()
-        
-        // Apply centralized color and blend mode strategy
+
         let finalColor: NSColor
         if hasAlpha {
-            // Transparent images (PNG): Use user color with configured opacity (SourceOver by default)
             finalColor = config.color.withAlphaComponent(settings.imageWatermarkOpacity)
         } else {
-            // Opaque images (JPG): Use forced color to keep image clean, apply Multiply blend mode
             finalColor = settings.opaqueImageForceColor ?? config.color
             ctx.setBlendMode(.multiply)
         }
-        
+
         let attrs: [NSAttributedString.Key: Any] = [.font: drawFont, .foregroundColor: finalColor]
-        
-        // Transform context to draw watermark diagonally at center
+
         ctx.translateBy(x: size.width / 2, y: size.height / 2)
         ctx.rotate(by: .pi / 4)
-        
-        // Draw each line of text
+
         var currentY = -totalHeight / 2 + lineHeight / 2
         for line in config.lines {
             let str = NSAttributedString(string: line, attributes: attrs)
@@ -375,13 +357,38 @@ enum WatermarkEngine {
             str.draw(at: NSPoint(x: -lineSize.width / 2, y: currentY - lineSize.height / 2))
             currentY += lineHeight
         }
-        
+
         ctx.restoreGState()
         NSGraphicsContext.restoreGraphicsState()
-        
-        // Export processed image to disk
-        guard let outputURL = getOutputURL(for: url) else { return }
-        
+
+        return bitmapRep
+    }
+
+    /// Processes a single image file (PNG, JPG, HEIC). Returns true on success.
+    @discardableResult
+    static func processImage(url: URL, config: WatermarkConfig, settings: WatermarkStyleSettings) -> Bool {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+            print("⚠️ Skipped (invalid, corrupted, or unsupported image format): \(url.lastPathComponent)")
+            return false
+        }
+
+        let size = NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+        guard size.width > 0, size.height > 0 else {
+            print("⚠️ Skipped (image size is zero): \(url.lastPathComponent)")
+            return false
+        }
+
+        let hasAlpha = cgImage.alphaInfo.hasAlpha
+
+        guard let bitmapRep = drawWatermark(on: cgImage, size: size, hasAlpha: hasAlpha,
+                                             config: config, settings: settings) else {
+            print("✘ Failed to render watermark: \(url.lastPathComponent)")
+            return false
+        }
+
+        guard let outputURL = getOutputURL(for: url) else { return false }
+
         let outputExt = outputURL.pathExtension.lowercased()
         let fileData: Data?
         if outputExt == "png" {
@@ -389,133 +396,136 @@ enum WatermarkEngine {
         } else {
             fileData = bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: settings.jpegCompressionQuality])
         }
-        
+
         guard let data = fileData else {
-            print("❌ Failed to generate image data: \(url.lastPathComponent)")
-            return
+            print("✘ Failed to generate image data: \(url.lastPathComponent)")
+            return false
         }
-        
+
         do {
             try data.write(to: outputURL)
-            print("✅ [Image] \(url.lastPathComponent) -> watermarked/ (\(hasAlpha ? "Alpha+SourceOver" : "Opaque+Multiply"))")
+            print("✔︎ [Image] \(url.lastPathComponent) -> watermarked/ (\(hasAlpha ? "Alpha+SourceOver" : "Opaque+Multiply"))")
+            return true
         } catch {
-            print("❌ Write failed: \(url.lastPathComponent) - \(error)")
+            print("✘ Write failed: \(url.lastPathComponent) - \(error)")
+            return false
         }
     }
     
-    /// Processes a single PDF file.
-    static func processPDF(url: URL, config: WatermarkConfig, settings: WatermarkStyleSettings) {
-        guard let doc = PDFDocument(url: url) else {
-            print("⚠️ Skipped (cannot read PDF): \(url.lastPathComponent)")
-            return
-        }
-        
-        guard doc.pageCount > 0 else {
-            print("⚠️ Skipped (PDF has 0 pages): \(url.lastPathComponent)")
-            return
-        }
-        
-        guard let outputURL = getOutputURL(for: url) else { return }
-        let tempURL = pdfTempBaseDir.appendingPathComponent(UUID().uuidString + ".pdf")
-        
-        // Attempt to copy basic metadata (Title, Author, etc.) from the original PDF
+    /// Extracts metadata from a PDFDocument using high-level attributes, avoiding raw CGPDFString encoding issues.
+    private static func extractMetadata(from doc: PDFDocument, url: URL) -> [CFString: Any] {
         var auxDict: [CFString: Any] = [:]
-        if let cgPDFDoc = CGPDFDocument(url as CFURL), let info = cgPDFDoc.info {
-            let keysToRead: [(readKey: String, writeKey: CFString)] = [
-                ("Title", kCGPDFContextTitle),
-                ("Author", kCGPDFContextAuthor),
-                ("Subject", kCGPDFContextSubject),
-                ("Creator", kCGPDFContextCreator)
-            ]
-            for mapping in keysToRead {
-                mapping.readKey.withCString { cKey in
-                    var pdfStringRef: CGPDFStringRef?
-                    if CGPDFDictionaryGetString(info, cKey, &pdfStringRef), let strRef = pdfStringRef {
-                        let length = CGPDFStringGetLength(strRef)
-                        if let bytes = CGPDFStringGetBytePtr(strRef) {
-                            let swiftStr = String(bytes: UnsafeBufferPointer(start: bytes, count: length), encoding: .utf8) ?? ""
-                            auxDict[mapping.writeKey] = swiftStr as CFString
-                        }
-                    }
+        let keyMap: [(PDFDocumentAttribute, CFString)] = [
+            (.titleAttribute, kCGPDFContextTitle),
+            (.authorAttribute, kCGPDFContextAuthor),
+            (.subjectAttribute, kCGPDFContextSubject),
+            (.creatorAttribute, kCGPDFContextCreator)
+        ]
+        if let docAttrs = doc.documentAttributes {
+            for (docKey, ctxKey) in keyMap {
+                if let value = docAttrs[docKey] as? String, !value.isEmpty {
+                    auxDict[ctxKey] = value as CFString
                 }
             }
         }
         if auxDict[kCGPDFContextTitle] == nil {
             auxDict[kCGPDFContextTitle] = "Watermarked - \(url.lastPathComponent)" as CFString
         }
-        
-        // Create a low-level CG PDF context for direct page manipulation
+        return auxDict
+    }
+
+    /// Draws the watermark text onto a PDF page within the given CGContext.
+    private static func drawWatermark(on page: PDFPage, in ctx: CGContext,
+                                       config: WatermarkConfig, settings: WatermarkStyleSettings) {
+        let bounds = page.bounds(for: .mediaBox)
+        let rotation = page.rotation
+        var visualWidth = bounds.width
+        var visualHeight = bounds.height
+        if rotation == 90 || rotation == 270 {
+            swap(&visualWidth, &visualHeight)
+        }
+
+        let targetLen = min(visualWidth, visualHeight) * sqrt(2) * settings.diagonalRatio
+        let fontSize = calculateFontSize(text: config.maxLineText, targetLength: targetLen, font: config.font)
+        let drawFont = NSFont(descriptor: config.font.fontDescriptor, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize, weight: .bold)
+
+        let lineHeight = fontSize * settings.lineHeightMultiplier
+        let totalHeight = CGFloat(config.lines.count) * lineHeight
+
+        ctx.saveGState()
+        ctx.setAlpha(settings.pdfWatermarkOpacity)
+
+        ctx.translateBy(x: bounds.width / 2, y: bounds.height / 2)
+        ctx.rotate(by: -CGFloat(rotation) * .pi / 180.0)
+        ctx.rotate(by: .pi / 4)
+
+        let attrs: [NSAttributedString.Key: Any] = [.font: drawFont, .foregroundColor: config.color]
+        var currentY = -totalHeight / 2 + lineHeight / 2
+
+        for line in config.lines {
+            let attrStr = NSAttributedString(string: line, attributes: attrs)
+            let textLine = CTLineCreateWithAttributedString(attrStr)
+            var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
+            let strWidth = CTLineGetTypographicBounds(textLine, &ascent, &descent, &leading)
+            let textHeight = ascent + descent + leading
+
+            ctx.saveGState()
+            ctx.translateBy(x: -strWidth / 2, y: currentY - textHeight / 2)
+            CTLineDraw(textLine, ctx)
+            ctx.restoreGState()
+
+            currentY += lineHeight
+        }
+        ctx.restoreGState()
+    }
+
+    /// Processes a single PDF file. Returns true on success.
+    @discardableResult
+    static func processPDF(url: URL, config: WatermarkConfig, settings: WatermarkStyleSettings) -> Bool {
+        guard let doc = PDFDocument(url: url) else {
+            print("⚠️ Skipped (cannot read PDF): \(url.lastPathComponent)")
+            return false
+        }
+
+        guard doc.pageCount > 0 else {
+            print("⚠️ Skipped (PDF has 0 pages): \(url.lastPathComponent)")
+            return false
+        }
+
+        guard let outputURL = getOutputURL(for: url) else { return false }
+        let tempURL = pdfTempBaseDir.appendingPathComponent(UUID().uuidString + ".pdf")
+
+        let auxDict = extractMetadata(from: doc, url: url)
+
         guard let consumer = CGDataConsumer(url: tempURL as CFURL),
               let ctx = CGContext(consumer: consumer, mediaBox: nil, auxDict as CFDictionary) else {
-            print("❌ PDF context creation failed: \(url.lastPathComponent)")
-            return
+            print("✘ PDF context creation failed: \(url.lastPathComponent)")
+            return false
         }
-        
+
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { continue }
             let bounds = page.bounds(for: .mediaBox)
             var mediaBox = CGRect(origin: .zero, size: bounds.size)
-            
+
             ctx.beginPage(mediaBox: &mediaBox)
             page.draw(with: .mediaBox, to: ctx)
-            
-            // Handle page rotation to ensure watermark aligns correctly
-            let rotation = page.rotation
-            var visualWidth = bounds.width
-            var visualHeight = bounds.height
-            if rotation == 90 || rotation == 270 {
-                swap(&visualWidth, &visualHeight)
-            }
-            
-            let targetLen = min(visualWidth, visualHeight) * sqrt(2) * settings.diagonalRatio
-            let fontSize = calculateFontSize(text: config.maxLineText, targetLength: targetLen, font: config.font)
-            let drawFont = NSFont(descriptor: config.font.fontDescriptor, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize, weight: .bold)
-            
-            let lineHeight = fontSize * settings.lineHeightMultiplier
-            let totalHeight = CGFloat(config.lines.count) * lineHeight
-            
-            ctx.saveGState()
-            // Apply configured opacity for PDF watermarks
-            ctx.setAlpha(settings.pdfWatermarkOpacity)
-            
-            // Transform context to draw watermark diagonally at center, counteracting page rotation
-            ctx.translateBy(x: bounds.width / 2, y: bounds.height / 2)
-            ctx.rotate(by: -CGFloat(rotation) * .pi / 180.0)
-            ctx.rotate(by: .pi / 4)
-            
-            // Use CoreText for precise PDF text rendering
-            let attrs: [NSAttributedString.Key: Any] = [.font: drawFont, .foregroundColor: config.color]
-            var currentY = -totalHeight / 2 + lineHeight / 2
-            
-            for line in config.lines {
-                let attrStr = NSAttributedString(string: line, attributes: attrs)
-                let textLine = CTLineCreateWithAttributedString(attrStr)
-                var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
-                let strWidth = CTLineGetTypographicBounds(textLine, &ascent, &descent, &leading)
-                let textHeight = ascent + descent + leading
-                
-                ctx.saveGState()
-                ctx.translateBy(x: -strWidth / 2, y: currentY - textHeight / 2)
-                CTLineDraw(textLine, ctx)
-                ctx.restoreGState()
-                
-                currentY += lineHeight
-            }
-            ctx.restoreGState()
+            drawWatermark(on: page, in: ctx, config: config, settings: settings)
             ctx.endPage()
         }
         ctx.closePDF()
-        
-        // Move temp file to final destination
+
         do {
             if FileManager.default.fileExists(atPath: outputURL.path) {
                 try FileManager.default.removeItem(at: outputURL)
             }
             try FileManager.default.moveItem(at: tempURL, to: outputURL)
-            print("✅ [PDF] \(url.lastPathComponent) -> watermarked/ (\(doc.pageCount) pages)")
+            print("✔︎ [PDF] \(url.lastPathComponent) -> watermarked/ (\(doc.pageCount) pages)")
+            return true
         } catch {
-            print("❌ PDF write failed: \(url.lastPathComponent) - \(error)")
+            print("✘ PDF write failed: \(url.lastPathComponent) - \(error)")
             try? FileManager.default.removeItem(at: tempURL)
+            return false
         }
     }
 }
@@ -563,7 +573,7 @@ func run() {
     do {
         try FileManager.default.createDirectory(at: pdfTempBaseDir, withIntermediateDirectories: true)
     } catch {
-        print("❌ Failed to create temp directory: \(error)")
+        print("✘ Failed to create temp directory: \(error)")
         exit(1)
     }
     
@@ -577,6 +587,7 @@ func run() {
     
     // Load standalone configuration block
     let styleSettings = WatermarkStyleSettings.default
+    NSApplication.shared.setActivationPolicy(.accessory)
     
     let osVersion = ProcessInfo.processInfo.operatingSystemVersion
     let settingsPath = (osVersion.majorVersion >= 13) ? "System Settings > Privacy & Security" : "System Preferences > Security & Privacy"
@@ -586,13 +597,13 @@ func run() {
     
     // 1. Get text input
     guard let inputText = TerminalUI.showInputDialog() else {
-        print("❌ Input cancelled.")
+        print("✘ Input cancelled.")
         exit(0)
     }
     
     let lines = inputText.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     guard !lines.isEmpty else {
-        print("❌ Watermark text cannot be empty.")
+        print("✘ Watermark text cannot be empty.")
         exit(1)
     }
     
@@ -617,12 +628,12 @@ func run() {
         print(" | \(line)")
     }
     print("🎨 Watermark color: \(config.colorChoiceName)")
-    print("🔤 Watermark font: \(config.fontChoiceName)")
+    print("🔔 Watermark font: \(config.fontChoiceName)")
     
     // 3. Get target files
     print("\nPlease drag and drop the files or folders to be processed here")
     guard let inputLine = readLine(), !inputLine.isEmpty else {
-        print("❌ No file path entered.")
+        print("✘ No file path entered.")
         exit(0)
     }
     
@@ -630,7 +641,7 @@ func run() {
     let targetFiles = resolveTargetFiles(from: rawPaths)
     
     guard !targetFiles.isEmpty else {
-        print("❌ No supported files found.")
+        print("✘ No supported files found.")
         exit(1)
     }
     
@@ -639,20 +650,29 @@ func run() {
     
     let pdfFiles = targetFiles.filter { $0.pathExtension.lowercased() == "pdf" }
     let imageFiles = targetFiles.filter { $0.pathExtension.lowercased() != "pdf" }
-    
+
+    var failedCount = 0
+
     for (index, file) in pdfFiles.enumerated() {
         print("[\(index + 1)/\(pdfFiles.count)] ", terminator: "")
-        // Pass configuration to engine
-        WatermarkEngine.processPDF(url: file, config: config, settings: styleSettings)
+        if !WatermarkEngine.processPDF(url: file, config: config, settings: styleSettings) {
+            failedCount += 1
+        }
     }
-    
+
     for (index, file) in imageFiles.enumerated() {
         print("[\(index + 1)/\(imageFiles.count)] ", terminator: "")
-        // Pass configuration to engine
-        WatermarkEngine.processImage(url: file, config: config, settings: styleSettings)
+        if !WatermarkEngine.processImage(url: file, config: config, settings: styleSettings) {
+            failedCount += 1
+        }
     }
-    
-    print("\n🎉 All processing completed!")
+
+    let succeeded = targetFiles.count - failedCount
+    if failedCount > 0 {
+        print("\n⚠️ Processing completed: \(succeeded) succeeded, \(failedCount) failed (out of \(targetFiles.count)).")
+    } else {
+        print("\n✔︎ All \(targetFiles.count) files processed successfully!")
+    }
     cleanUpTempFiles()
 }
 
