@@ -875,8 +875,35 @@ private let sigintSource: DispatchSourceSignal = {
     return source
 }()
 
+/// Prints CLI usage. Only `-h` / `--help` are recognised; everything else
+/// starts the interactive flow, so `watermark --help` stays a safe, dialog-free
+/// probe (used by the Homebrew formula's `test do`).
+func printHelp() {
+    print("""
+    watermark — 批量图片/PDF 水印工具
+
+    用法:
+      watermark             交互式处理：系统对话框输入水印文字，终端选择字体和颜色，\
+    然后拖入文件或文件夹
+      watermark -h, --help  显示本帮助
+
+    多行水印：在输入对话框中使用 '|' 分隔，例如 版权所有|请勿转载。
+    多行按输入顺序自上而下排列，左对齐于最长行。
+
+    支持格式：PNG / JPG / JPEG / HEIC（输出为 PNG）/ PDF
+    输出位置：每个源文件所在目录下的 watermarked/，镜像源目录结构
+    """)
+}
+
 /// Main program entry point.
 func run() {
+    // Handle --help before anything else: no temp dir, no activation policy, no
+    // system dialog — so it is safe to run headlessly (Homebrew's `brew test`).
+    if CommandLine.arguments.dropFirst().contains(where: { $0 == "-h" || $0 == "--help" }) {
+        printHelp()
+        exit(0)
+    }
+
     // Force-initialize the file-scope SIGINT source. Top-level `let` globals
     // are lazily initialized, and without a reference here the handler would
     // never be installed — Ctrl+C cleanup would silently do nothing.

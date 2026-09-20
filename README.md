@@ -42,6 +42,8 @@ brew install --formula watermark
 ./watermark
 ```
 
+查看命令行用法：`./watermark --help`
+
 2. 在弹出的系统对话框中输入水印文字，多行文本用 `|` 分隔（例如：`版权所有|请勿转载`）
 
 3. 在终端中选择水印颜色
