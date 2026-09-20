@@ -489,12 +489,22 @@ enum WatermarkEngine {
         ctx.translateBy(x: center.x, y: center.y)
         ctx.rotate(by: rotationAngle)
 
-        var currentY = -totalHeight / 2 + lineHeight / 2
-        for line in lines {
-            let attrStr = NSAttributedString(string: line, attributes: attrs)
-            let textLine = CTLineCreateWithAttributedString(attrStr)
+        let textLines = lines.map { CTLineCreateWithAttributedString(NSAttributedString(string: $0, attributes: attrs)) }
+        // Lines are left-aligned: every line starts at the same x, the left edge
+        // of the widest line, so the block as a whole stays centred on it.
+        var maxWidth: CGFloat = 0
+        for textLine in textLines {
+            maxWidth = max(maxWidth, CTLineGetTypographicBounds(textLine, nil, nil, nil))
+        }
+        let leftX = -maxWidth / 2
+
+        // The context is y-up, so the first line must sit at the highest y and
+        // each following line one line-height *down* — advancing upward would
+        // print the block bottom-to-top (the lines would come out reversed).
+        var currentY = totalHeight / 2 - lineHeight / 2
+        for textLine in textLines {
             var ascent: CGFloat = 0, descent: CGFloat = 0, leading: CGFloat = 0
-            let strWidth = CTLineGetTypographicBounds(textLine, &ascent, &descent, &leading)
+            _ = CTLineGetTypographicBounds(textLine, &ascent, &descent, &leading)
 
             ctx.saveGState()
             // CTLineDraw advances the context's textPosition/textMatrix to the
@@ -509,11 +519,11 @@ enum WatermarkEngine {
             // glyph block is visually centered on currentY. (Baseline at
             // currentY - textHeight/2 would drag every line's block toward the
             // image corner by descent+leading/2.)
-            ctx.translateBy(x: -strWidth / 2, y: currentY - (ascent - descent) / 2)
+            ctx.translateBy(x: leftX, y: currentY - (ascent - descent) / 2)
             CTLineDraw(textLine, ctx)
             ctx.restoreGState()
 
-            currentY += lineHeight
+            currentY -= lineHeight
         }
         ctx.restoreGState()
     }
