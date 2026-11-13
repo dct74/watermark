@@ -1,6 +1,6 @@
 # Watermark - 批量图片/PDF 水印工具
 
-一款 macOS 命令行水印工具，支持对 PNG、JPG、HEIC 和 PDF 文件进行批量水印处理。用户通过系统原生对话框输入水印文字，在终端中选择字体和颜色，然后拖入文件或文件夹即可自动完成批量处理。
+一款 macOS 命令行水印工具，支持对 PNG、JPG、HEIC 和 PDF 文件进行批量水印处理。用户先拖入文件或文件夹，通过系统原生对话框输入水印文字，在终端中选择字体和颜色即可自动完成批量处理。
 
 ## 功能特性
 
@@ -44,19 +44,22 @@ brew install --formula watermark
 
 查看命令行用法：`./watermark --help`
 
-2. 在弹出的系统对话框中输入水印文字，多行文本用 `|` 分隔（例如：`版权所有|请勿转载`）
+2. 将文件或文件夹拖入终端窗口，按回车
 
-3. 在终端中选择水印颜色
+3. 在弹出的系统对话框中输入水印文字，多行文本用 `|` 分隔（例如：`版权所有|请勿转载`）
 
-4. 在终端中选择水印字体
+4. 在终端中选择水印颜色
 
-5. 确认信息后，将文件或文件夹拖入终端窗口，按回车开始处理
+5. 在终端中选择水印字体
 
 6. 处理完成后，在原始文件所在目录会生成 `watermarked/` 子文件夹，内含所有已添加水印的文件。拖入文件夹时，`watermarked/` 内部会镜像源目录的子目录结构
 
 ### 操作示例
 
 ```
+📂 Please drag and drop the files or folders to be processed here
+/Users/me/Photos /Users/me/document.pdf
+
 💡 Tip: If the dialog doesn't appear, please grant 'Accessibility' permission to your Terminal in System Settings > Privacy & Security.
 
 ⏳ Invoking system input dialog...
@@ -75,9 +78,6 @@ brew install --formula watermark
  | 请勿转载
 🎨 Watermark color: Neutral Gray
 🔔 Watermark font: System Default (PingFangSC-Bold)
-
-Please drag and drop the files or folders to be processed here
-/Users/me/Photos /Users/me/document.pdf
 
 🔍 Found 12 files.
 🚀 Starting batch processing...

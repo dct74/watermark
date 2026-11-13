@@ -883,8 +883,8 @@ func printHelp() {
     watermark — 批量图片/PDF 水印工具
 
     用法:
-      watermark             交互式处理：系统对话框输入水印文字，终端选择字体和颜色，\
-    然后拖入文件或文件夹
+      watermark             交互式处理：先拖入要处理的文件或文件夹，系统对话框输入水印文字，\
+    终端选择字体和颜色
       watermark -h, --help  显示本帮助
 
     多行水印：在输入对话框中使用 '|' 分隔，例如 版权所有|请勿转载。
@@ -927,10 +927,28 @@ func run() {
     let osVersion = ProcessInfo.processInfo.operatingSystemVersion
     let settingsPath = (osVersion.majorVersion >= 13) ? "System Settings > Privacy & Security" : "System Preferences > Security & Privacy"
 
-    print("💡 Tip: If the dialog doesn't appear, please grant 'Accessibility' permission to your Terminal in \(settingsPath).\n")
+    // 1. Get target files first: without them there is nothing to style, and
+    // the drag-and-drop step needs no dialog or terminal UI.
+    print("📂 Please drag and drop the files or folders to be processed here")
+    guard let inputLine = readLine(), !inputLine.isEmpty else {
+        print("✘ No file path entered.")
+        cleanUpTempFiles()
+        exit(0)
+    }
+
+    let rawPaths = WatermarkEngine.parseInputPaths(input: inputLine)
+    let targetFiles = resolveTargetFiles(from: rawPaths)
+
+    guard !targetFiles.isEmpty else {
+        print("✘ No supported files found.")
+        cleanUpTempFiles()
+        exit(1)
+    }
+
+    print("\n💡 Tip: If the dialog doesn't appear, please grant 'Accessibility' permission to your Terminal in \(settingsPath).\n")
     print("⏳ Invoking system input dialog...")
 
-    // 1. Get text input
+    // 2. Get text input
     guard let inputText = TerminalUI.showInputDialog() else {
         print("✘ Input cancelled.")
         cleanUpTempFiles()
@@ -944,7 +962,7 @@ func run() {
         exit(1)
     }
 
-    // 2. Get style preferences (pass configuration to UI layer)
+    // 3. Get style preferences (pass configuration to UI layer)
     guard let colorResult = TerminalUI.selectColorInTerminal(settings: styleSettings) else {
         cleanUpTempFiles()
         exit(1)
@@ -972,23 +990,6 @@ func run() {
     }
     print("🎨 Watermark color: \(config.colorChoiceName)")
     print("🔔 Watermark font: \(config.fontChoiceName)")
-
-    // 3. Get target files
-    print("\nPlease drag and drop the files or folders to be processed here")
-    guard let inputLine = readLine(), !inputLine.isEmpty else {
-        print("✘ No file path entered.")
-        cleanUpTempFiles()
-        exit(0)
-    }
-
-    let rawPaths = WatermarkEngine.parseInputPaths(input: inputLine)
-    let targetFiles = resolveTargetFiles(from: rawPaths)
-
-    guard !targetFiles.isEmpty else {
-        print("✘ No supported files found.")
-        cleanUpTempFiles()
-        exit(1)
-    }
 
     // 4. Execute batch processing
     print("\n🔍 Found \(targetFiles.count) files.\n🚀 Starting batch processing...\n")
